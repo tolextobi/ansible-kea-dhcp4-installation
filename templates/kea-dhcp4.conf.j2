@@ -1,0 +1,63 @@
+{
+  "Dhcp4": {
+    "interfaces-config": {
+      "interfaces": [ "{{ kea_interface }}" ]
+    },
+    "control-sockets": [
+      {
+        "socket-type": "unix",
+        "socket-name": "/var/run/kea/kea4-ctrl-socket"
+      }
+    ],
+    "hooks-libraries": [
+      {
+        "library": "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_host_cmds.so"
+      }
+    ],
+    "lease-database": {
+      "type": "memfile",
+      "persist": true,
+      "name": "/var/lib/kea/kea-leases4.csv"
+    },
+    "valid-lifetime": 4000,
+    "subnet4": [
+{% for subnet in kea_subnets %}
+      {
+        "id": {{ subnet.id }},
+        "subnet": "{{ subnet.subnet }}",
+        "pools": [
+          { "pool": "{{ subnet.pool_start }} - {{ subnet.pool_end }}" }
+        ],
+        "option-data": [
+          { "name": "routers",            "data": "{{ subnet.router }}" },
+          { "name": "domain-name-servers","data": "{{ subnet.dns }}" },
+          { "name": "domain-name",        "data": "{{ subnet.domain }}" }
+        ],
+        "reservations": [
+{% for host in subnet.reservations %}
+          {
+            "hostname":   "{{ host.hostname }}",
+            "hw-address": "{{ host.hw_address }}",
+            "ip-address": "{{ host.ip_address }}"{% if host.pxe %},
+            "next-server": "{{ kea_pxe_next_server }}",
+            "option-data": [
+              { "name": "boot-file-name", "data": "{{ kea_pxe_boot_file }}" }
+            ]{% endif %}
+
+          }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+        ]
+      }{% if not loop.last %},{% endif %}
+
+{% endfor %}
+    ],
+    "loggers": [
+      {
+        "name": "kea-dhcp4",
+        "output-options": [ { "output": "/var/log/kea/kea-dhcp4.log" } ],
+        "severity": "INFO"
+      }
+    ]
+  }
+}
