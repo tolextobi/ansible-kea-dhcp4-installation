@@ -1,0 +1,23 @@
+---
+# Kea DHCP Versionen
+kea_version: "3.0.2-isc20251017150356"
+kea_ctrl_agent_version: "3.0.2-isc20251017150356"
+
+# Stork Versionen
+stork_server_version: "2.4.0.260218163504"
+stork_agent_version: "2.4.0.260218163426"
+
+# Netzwerk
+kea_interface: "ens37"
+kea_pool_start: "192.168.50.100"
+kea_pool_end: "192.168.50.200"
+kea_gateway: "192.168.50.1"
+kea_dns: "8.8.8.8"
+
+# Stork Agent
+stork_agent_host: "192.168.145.100"
+stork_agent_port: "8081"
+
+# Sunetze PXE
+kea_pxe_next_server: "192.168.50.1"
+kea_pxe_boot_file: "/pxelinux.0"
