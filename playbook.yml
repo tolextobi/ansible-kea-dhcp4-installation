@@ -1,0 +1,489 @@
+---
+- name: Install and configure Kea DHCP + Kea Control Agent + Stork
+  hosts: kea_server
+  become: true
+  vars_files:
+    - vars/vars.yml
+    - vars/vars_secret.yml
+    - vars/subnets.yml
+
+  tasks:
+
+    # KEA DHCP - Repository einrichten
+
+    - name: Install required packages for Kea repository
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - curl
+          - gnupg
+          - python3-apt
+        state: present
+        update_cache: true
+      tags: kea
+
+    - name: Download Kea 3.0 GPG key
+      ansible.builtin.get_url:
+        url: https://dl.cloudsmith.io/public/isc/kea-3-0/gpg.B16C44CD45514C3C.key
+        dest: /tmp/isc-kea-3-0.key
+        mode: "0644"
+      tags: kea
+
+    - name: Convert and install Kea 3.0 GPG key
+      ansible.builtin.shell: |
+        gpg --dearmor < /tmp/isc-kea-3-0.key > /usr/share/keyrings/isc-kea-3-0-archive-keyring.gpg
+        chmod 644 /usr/share/keyrings/isc-kea-3-0-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/isc-kea-3-0-archive-keyring.gpg
+      tags: kea
+
+    - name: Add Kea 3.0 apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/isc-kea-3-0-archive-keyring.gpg] https://dl.cloudsmith.io/public/isc/kea-3-0/deb/debian trixie main"
+        state: present
+        filename: isc-kea-3-0
+        update_cache: true
+      tags: kea
+
+    # KEA DHCP - Installation
+
+    - name: Install Kea DHCP server and Control Agent
+      ansible.builtin.apt:
+        name:
+          - "isc-kea-dhcp4={{ kea_version }}"
+          - "isc-kea-ctrl-agent={{ kea_ctrl_agent_version }}"
+        state: present
+        update_cache: true
+      tags: kea
+
+    - name: Install Kea hooks (enthaelt host_cmds fuer Host Reservations via Stork)
+      ansible.builtin.apt:
+        name:
+          - "isc-kea-hooks={{ kea_version }}"
+        state: present
+        update_cache: true
+      tags: kea
+
+    - name: Hold Kea packages at installed version
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - isc-kea-dhcp4
+        - isc-kea-ctrl-agent
+        - isc-kea-hooks
+      tags: kea
+
+    - name: Ensure /etc/kea directory has correct permissions
+      ansible.builtin.file:
+        path: /etc/kea
+        state: directory
+        owner: root
+        group: _kea
+        mode: "0750"
+      tags: kea
+
+    - name: Ensure Kea runtime directory exists
+      ansible.builtin.file:
+        path: /var/run/kea
+        state: directory
+        owner: _kea
+        group: _kea
+        mode: "0750"
+      tags: kea
+
+    - name: Ensure Kea lease directory exists
+      ansible.builtin.file:
+        path: /var/lib/kea
+        state: directory
+        owner: _kea
+        group: _kea
+        mode: "0755"
+      tags: kea
+
+    - name: Ensure Kea log directory exists
+      ansible.builtin.file:
+        path: /var/log/kea
+        state: directory
+        owner: _kea
+        group: _kea
+        mode: "0755"
+      tags: kea
+
+    - name: Deploy Kea DHCP configuration
+      ansible.builtin.template:
+        src: templates/kea-dhcp4.conf.j2
+        dest: /etc/kea/kea-dhcp4.conf
+        owner: root
+        group: _kea
+        mode: "0640"
+      notify: Restart Kea
+      tags: kea
+
+    - name: Deploy Kea Control Agent configuration
+      ansible.builtin.copy:
+        dest: /etc/kea/kea-ctrl-agent.conf
+        content: |
+          {
+            "Control-agent": {
+              "http-host": "127.0.0.1",
+              "http-port": 8000,
+              "control-sockets": {
+                "dhcp4": {
+                  "socket-type": "unix",
+                  "socket-name": "/var/run/kea/kea4-ctrl-socket"
+                }
+              }
+            }
+          }
+        owner: root
+        group: _kea
+        mode: "0640"
+      notify: Restart Kea Control Agent
+      tags: kea
+
+    - name: Create Kea API password file
+      ansible.builtin.copy:
+        dest: /etc/kea/kea-api-password
+        content: "{{ kea_api_password }}"
+        owner: root
+        group: _kea
+        mode: "0640"
+      tags: kea
+
+    - name: Add stork-agent user to _kea group
+      ansible.builtin.user:
+        name: stork-agent
+        groups: _kea
+        append: true
+      tags: kea
+
+    # WORKAROUND: Stork 2.4 + Kea 3.0 Socket-Permission-Bug
+    # ISC KB:     https://kb.isc.org/docs/stork-kea-socket-perms
+    # GitLab:     https://gitlab.isc.org/isc-projects/stork/-/issues/2381
+
+    - name: "Stork Workaround | systemd override Verzeichnis anlegen"
+      ansible.builtin.file:
+        path: /etc/systemd/system/isc-kea-dhcp4-server.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags:
+        - kea
+        - kea_socket_workaround
+
+    - name: "Stork Workaround | systemd override fuer Socket-Permissions deployen"
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/isc-kea-dhcp4-server.service.d/socket-perms.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Workaround: Stork 2.4 + Kea 3.0 Socket-Permission-Bug
+          # https://kb.isc.org/docs/stork-kea-socket-perms
+          [Service]
+          ExecStartPost=sleep 5 ; chmod g+w /var/run/kea/kea4-ctrl-socket
+      notify:
+        - Systemd daemon-reload
+        - Restart Kea
+      tags:
+        - kea
+        - kea_socket_workaround
+
+    # WORKAROUND Ende
+
+
+    - name: Enable and start Kea DHCP service
+      ansible.builtin.systemd:
+        name: isc-kea-dhcp4-server
+        state: started
+        enabled: true
+      tags: kea
+
+    - name: Enable and start Kea Control Agent
+      ansible.builtin.systemd:
+        name: isc-kea-ctrl-agent
+        state: started
+        enabled: true
+      tags: kea
+
+    # STORK - Voraussetzungen
+
+    - name: Install required packages for apt repository
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - curl
+          - gnupg
+          - python3-apt
+        state: present
+        update_cache: true
+      tags: stork
+
+    # STORK - Repository sauber einrichten
+
+    - name: Download Stork GPG key
+      ansible.builtin.get_url:
+        url: https://dl.cloudsmith.io/public/isc/stork/gpg.77F64EC28053D1FB.key
+        dest: /tmp/isc-stork.key
+        mode: "0644"
+      tags: stork
+
+    - name: Convert and install Stork GPG key
+      ansible.builtin.shell: |
+        gpg --dearmor < /tmp/isc-stork.key > /usr/share/keyrings/isc-stork-archive-keyring.gpg
+        chmod 644 /usr/share/keyrings/isc-stork-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/isc-stork-archive-keyring.gpg
+      tags: stork
+
+    - name: Add Stork apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/isc-stork-archive-keyring.gpg] https://dl.cloudsmith.io/public/isc/stork/deb/debian trixie main"
+        state: present
+        filename: isc-stork
+        update_cache: true
+      tags: stork
+
+    # STORK - PostgreSQL
+
+    - name: Install PostgreSQL
+      ansible.builtin.apt:
+        name:
+          - postgresql
+          - python3-psycopg2
+        state: present
+        update_cache: true
+      tags: stork
+
+    - name: Ensure PostgreSQL is started
+      ansible.builtin.systemd:
+        name: postgresql
+        state: started
+        enabled: true
+      tags: stork
+
+    - name: Create Stork database user and database
+      ansible.builtin.shell: |
+        set -o pipefail
+        sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='stork'" | grep -q 1 || \
+          sudo -u postgres psql -c "CREATE USER stork WITH PASSWORD '{{ stork_db_password }}';"
+        sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='stork'" | grep -q 1 || \
+          sudo -u postgres psql -c "CREATE DATABASE stork OWNER stork;"
+      args:
+        executable: /bin/bash
+      changed_when: false
+      tags: stork
+
+    # STORK - Installation
+
+    - name: Install Stork server and agent
+      ansible.builtin.apt:
+        name:
+          - "isc-stork-server={{ stork_server_version }}"
+          - "isc-stork-agent={{ stork_agent_version }}"
+        state: present
+        update_cache: true
+      tags: stork
+
+    - name: Hold Stork packages at installed version
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - isc-stork-server
+        - isc-stork-agent
+      tags: stork
+
+    - name: Deploy Stork server environment config
+      ansible.builtin.copy:
+        dest: /etc/stork/server.env
+        content: |
+          STORK_DATABASE_HOST=localhost
+          STORK_DATABASE_PORT=5432
+          STORK_DATABASE_NAME=stork
+          STORK_DATABASE_USER_NAME=stork
+          STORK_DATABASE_PASSWORD={{ stork_db_password }}
+          STORK_REST_HOST=0.0.0.0
+          STORK_REST_PORT=8080
+        mode: "0640"
+      notify: Restart Stork Server
+      tags: stork
+
+    - name: Deploy Stork agent environment config
+      ansible.builtin.copy:
+        dest: /etc/stork/agent.env
+        content: |
+          STORK_AGENT_HOST={{ stork_agent_host }}
+          STORK_AGENT_PORT={{ stork_agent_port }}
+          STORK_AGENT_SERVER_URL=http://localhost:8080
+          # Prometheus-Metriken werden automatisch auf Port 9547 exponiert
+        mode: "0640"
+      notify: Restart Stork Agent
+      tags: stork
+
+    - name: Enable and start Stork server
+      ansible.builtin.systemd:
+        name: isc-stork-server
+        state: started
+        enabled: true
+      tags: stork
+
+    - name: Enable and start Stork agent
+      ansible.builtin.systemd:
+        name: isc-stork-agent
+        state: started
+        enabled: true
+      tags: stork
+
+    # PROMETHEUS
+    # Scraped Kea/Stork-Metriken vom Stork Agent (Port 9547)
+    # WebUI: http://192.168.145.100:9090
+
+    - name: Install Prometheus
+      ansible.builtin.apt:
+        name: prometheus
+        state: present
+        update_cache: true
+      tags: monitoring
+
+    - name: Deploy Prometheus configuration
+      ansible.builtin.copy:
+        dest: /etc/prometheus/prometheus.yml
+        owner: prometheus
+        group: prometheus
+        mode: "0644"
+        content: |
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+
+          scrape_configs:
+            - job_name: "stork-agent"
+              static_configs:
+                - targets: ["localhost:9547"]
+              # Stork Agent exportiert Kea DHCPv4/v6 Metriken auf diesem Port
+      notify: Restart Prometheus
+      tags: monitoring
+
+    - name: Enable and start Prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: started
+        enabled: true
+      tags: monitoring
+
+    # GRAFANA
+    # Visualisiert Prometheus-Daten
+    # WebUI: http://192.168.145.100:3000
+
+    - name: Download Grafana GPG key
+      ansible.builtin.get_url:
+        url: https://apt.grafana.com/gpg.key
+        dest: /tmp/grafana.key
+        mode: "0644"
+      tags: monitoring
+
+    - name: Convert and install Grafana GPG key
+      ansible.builtin.shell: |
+        gpg --dearmor < /tmp/grafana.key > /usr/share/keyrings/grafana-archive-keyring.gpg
+        chmod 644 /usr/share/keyrings/grafana-archive-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/grafana-archive-keyring.gpg
+      tags: monitoring
+
+    - name: Add Grafana apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/grafana-archive-keyring.gpg] https://apt.grafana.com stable main"
+        state: present
+        filename: grafana
+        update_cache: true
+      tags: monitoring
+
+    - name: Install Grafana
+      ansible.builtin.apt:
+        name: grafana
+        state: present
+        update_cache: true
+      tags: monitoring
+
+    - name: Configure Grafana (Port + Admin-Passwort)
+      ansible.builtin.lineinfile:
+        path: /etc/grafana/grafana.ini
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backrefs: true
+      loop:
+        - { regexp: '^;?http_port\s*=.*', line: 'http_port = 3000' }
+        - { regexp: '^;?admin_password\s*=.*', line: 'admin_password = {{ grafana_admin_password }}' }
+      notify: Restart Grafana
+      tags: monitoring
+
+    - name: Enable and start Grafana
+      ansible.builtin.systemd:
+        name: grafana-server
+        state: started
+        enabled: true
+      tags: monitoring
+
+    - name: "Grafana | Warten bis API erreichbar ist"
+      ansible.builtin.wait_for:
+        host: localhost
+        port: 3000
+        timeout: 30
+      tags: monitoring
+
+    - name: "Grafana | Prometheus Datasource einrichten"
+      ansible.builtin.uri:
+        url: "http://localhost:3000/api/datasources"
+        method: POST
+        user: admin
+        password: "{{ grafana_admin_password }}"
+        force_basic_auth: true
+        body_format: json
+        status_code: [200, 409]   # 409 = existiert bereits, kein Fehler
+        body:
+          name: "Prometheus"
+          type: "prometheus"
+          url: "http://localhost:9090"
+          access: "proxy"
+          isDefault: true
+      tags: monitoring
+
+  # HANDLERS
+
+  handlers:
+    - name: Systemd daemon-reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Restart Kea
+      ansible.builtin.systemd:
+        name: isc-kea-dhcp4-server
+        state: restarted
+
+    - name: Restart Kea Control Agent
+      ansible.builtin.systemd:
+        name: isc-kea-ctrl-agent
+        state: restarted
+
+    - name: Restart Stork Server
+      ansible.builtin.systemd:
+        name: isc-stork-server
+        state: restarted
+
+    - name: Restart Stork Agent
+      ansible.builtin.systemd:
+        name: isc-stork-agent
+        state: restarted
+
+    - name: Restart Prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: restarted
+
+    - name: Restart Grafana
+      ansible.builtin.systemd:
+        name: grafana-server
+        state: restarted
