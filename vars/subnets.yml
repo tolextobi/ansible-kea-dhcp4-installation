@@ -95,8 +95,8 @@ kea_subnets:
         pxe: false
 
   # Subnet 4: Gemischtes Netz - ZWEI Configs
-  # Pool A: Lab-PCs mit PXE (wie pc-Hosts in Prod)
-  # Pool B: Management-Devices ohne PXE (wie gm-* in Prod)
+  # Pool A: Lab-PCs mit PXE 
+  # Pool B: Management-Devices ohne PXE 
   - id: 4
     subnet: "192.168.53.0/24"
     router: "192.168.53.1"
